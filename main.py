@@ -6,6 +6,8 @@ import random
 import sys
 from dataclasses import dataclass
 from datetime import timedelta
+from enum import Enum, auto
+from typing import assert_never
 
 from aiogram.types import BotCommand
 
@@ -22,21 +24,31 @@ ENV_PREFIX = "MAFIA_PREDICTION_BOT_"
 # Bot token can be obtained via https://t.me/BotFather
 TELEGRAM_TOKEN = os.getenv(f"{ENV_PREFIX}TELEGRAM_TOKEN")
 PATH_TO_PREDICTION_MEMES = os.getenv(f"{ENV_PREFIX}PATH_TO_PREDICTION_MEMES", "./prediction_memes")
-PREDICTION_DURATION_IN_SECONDS = int(os.getenv(f"{ENV_PREFIX}PREDICTION_DURATION_IN_SECONDS", 10))
+PATH_TO_PREDICTION_FILE = os.getenv(f"{ENV_PREFIX}PATH_TO_PREDICTION_FILE", "./predictions.txt")
+PREDICTION_DURATION_IN_SECONDS = int(os.getenv(f"{ENV_PREFIX}PREDICTION_DURATION_IN_SECONDS", 86400))
+ONLY_TEXT_PREDICTIONS = bool(os.getenv(f"{ENV_PREFIX}ONLY_TEXT_PREDICTIONS", True))
 
 # All handlers should be attached to the Router (or Dispatcher)
 dp = Dispatcher()
 
+class PredictionTypes(Enum):
+    text = auto()
+    file = auto()
+
 @dataclass
 class PredictionData:
-    file_name: str
     expired_at: datetime.datetime
+    file_name: str | None = None
+    phrase: str | None = None
 
     @property
     def abs_file_path(self) -> Path:
         return Path(PATH_TO_PREDICTION_MEMES, self.file_name).resolve()
 
-PREDICTION_FILES_IN_USE: set[str] = set()
+    @property
+    def prediction_type(self) -> PredictionTypes:
+        return PredictionTypes.text if self.phrase is not None else PredictionTypes.file
+
 IN_MEMORY_PREDICTION_DB: dict[int, PredictionData] = {}
 
 
@@ -58,12 +70,30 @@ async def choose_prediction(message: Message) -> None:
     user_id: int = message.from_user.id
     prediction: PredictionData = IN_MEMORY_PREDICTION_DB.get(user_id, None)
     if prediction is not None and prediction.expired_at > datetime.datetime.now():
-        await message.reply_photo(FSInputFile(prediction.abs_file_path), caption="Твое маф будущее на сегодня и не пытайся это поменять")
+        match prediction.prediction_type:
+            case PredictionTypes.text:
+                await message.reply(text=prediction.phrase)
+            case PredictionTypes.file:
+                await message.reply_photo(FSInputFile(prediction.abs_file_path), caption="Твое маф будущее на сегодня и не пытайся это поменять")
+            case _ as unreachable:
+                assert_never(unreachable)
     else:
         IN_MEMORY_PREDICTION_DB.pop(user_id, None)
-        new_prediction_file = random.choice(os.listdir(PATH_TO_PREDICTION_MEMES))
-        new_prediction = PredictionData(file_name=new_prediction_file, expired_at=datetime.datetime.now() + timedelta(seconds=PREDICTION_DURATION_IN_SECONDS))
-        await message.reply_photo(FSInputFile(new_prediction.abs_file_path), caption="Мое предсказание для тебя")
+        prediction_type = PredictionTypes.text if ONLY_TEXT_PREDICTIONS else random.choice(list(PredictionTypes))
+        expired_at = datetime.datetime.now() + timedelta(seconds=PREDICTION_DURATION_IN_SECONDS)
+        match prediction_type:
+            case PredictionTypes.text:
+                with open(Path(PATH_TO_PREDICTION_FILE).resolve()) as f:
+                    # Каждый раз открываю файл что бы не перезагружать (и не сбрасывать предсказания соответсвенно) если нужно добавить еще предсказаний
+                    text_prediction = random.choice([l for l in f.readlines()])
+                new_prediction = PredictionData(phrase=text_prediction, expired_at=expired_at)
+                await message.reply(text=new_prediction.phrase)
+            case PredictionTypes.file:
+                new_prediction_file = random.choice(os.listdir(PATH_TO_PREDICTION_MEMES))
+                new_prediction = PredictionData(file_name=new_prediction_file, expired_at=expired_at)
+                await message.reply_photo(FSInputFile(new_prediction.abs_file_path), caption="Мое предсказание для тебя")
+            case _ as unreachable:
+                assert_never(unreachable)
         IN_MEMORY_PREDICTION_DB[user_id] = new_prediction
 
 
